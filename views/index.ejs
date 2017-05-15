@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title><%= title %></title>
+    <link rel='stylesheet' href='/stylesheets/style.css' />
+    <script type="text/javascript" src="/javascripts/nipplejs.js"></script>
+    <script type="text/javascript" src="/javascripts/jsmpg.js"></script>
+    <script type="text/javascript" src="/dist/socket.io.js"></script>
+  </head>
+  <body>
+    <div class="video-container">
+      <canvas id="canvas-video" width="640" height="480"></canvas>
+    </div>
+
+    <div class="joystick-container" id="zone_joystick"></div>
+    <div class="button-container">
+      <button id="calibrateButton" class="calibrate-button" onClick="calibrateMotor()" >Calibrate Motor</button>
+    </div>
+  <br/>
+    <div class="text-container">
+      <h2 id="xPos"></h2>
+      <h2 id="yPos"></h2>
+    </div>
+
+    <script type="text/javascript" src="/javascripts/indexClient.js"></script>
+  </body>
+</html>

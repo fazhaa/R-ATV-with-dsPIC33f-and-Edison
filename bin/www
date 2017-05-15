@@ -1,0 +1,313 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+var ws = require('ws');
+var app = require('../app');
+var debug = require('debug')('express2.0:server');
+var http = require('http');
+var io = require('socket.io');
+var childProcess = require('child_process');
+var path = require('path');
+var ffmpeg = require('fluent-ffmpeg');
+var mraa = require('mraa');
+var servo = new mraa.Pwm(5);
+var motor = new mraa.Pwm(3);
+
+
+servo.enable(true);
+motor.enable(true);
+servo.period_us(19850);
+motor.period_us(20000);
+motor.write(.1);
+
+//console.log("Using PWM pin number: 5");
+
+// center the steering servos
+servoCenter();
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Attach the socket.io listener to our server for sending events
+ */
+io = io.listen(server);
+
+
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+// servo and motor busy flags
+var servoBusy = false;
+var motorBusy = false;
+var motorCalibrating = false;
+
+
+io.on('connection', function(socket){
+  console.log('User connected!');
+
+    // Handle new x event
+    socket.on('new X', function(msg){
+        // if the servo is busy, ignore event
+        if(!servoBusy){
+            servoBusy = true;
+            //move servo
+            servoMove(msg);
+            // wait 150ms and then free up servo
+            setTimeout(function(){
+                servoBusy = false;
+            }, 150);
+        }
+    });
+    // Handle center x coordinates event
+    socket.on('center X', function(msg){
+        servoCenter();
+    });
+    // Handle center Y coordinates event
+    socket.on('center Y', function(msg){
+        motorStop();
+    });
+
+    socket.on('new Y', function(msg){
+        // if the motor is busy, ignore event
+        if(!motorBusy){
+            motorBusy = true;
+            //console.log('starting motor instruction.');
+            motorGo(msg);
+            setTimeout(function(){
+                motorBusy = false;
+            }, 150);
+        }
+    });
+
+    socket.on('calibrate motor', function(){
+        console.log('motor calibration hit');
+        motorBusy = true;
+        motorCalibrating = true;
+        calibrateMotor();
+
+    });
+
+});
+
+/*
+    Set the webcam variables
+*/
+var STREAM_MAGIC_BYTES = 'jsmp';
+var width = 320;
+var height = 240;
+
+/*
+  WebSocket server for the stream setup and listener setup
+ */
+var wsServer = new (ws.Server)({ port:8084 });
+console.log("WebSocket server listening on port 8084");
+
+wsServer.on('connection', function(socket){
+
+    var streamHeader = new Buffer(8);
+
+    streamHeader.write(STREAM_MAGIC_BYTES);
+    streamHeader.writeUInt16BE(width, 4);
+    streamHeader.writeUInt16BE(height, 6);
+    socket.send(streamHeader, { binary: true });
+
+    console.log('New WebSocket Connection (' + wsServer.clients.length + ' total)');
+
+    socket.on('close', function(code, message){
+        console.log('Disconnected WebSocket (' + wsServer.clients.length + ' total)');
+    });
+    socket.on('new X', function(msg){
+        console.log('New X: ' + msg.newX);
+    });
+
+    socket.on('new Y', function(msg){
+        console.log('New Y: ' + msg.newY);
+    });
+
+});
+
+wsServer.broadcast = function(data, opts) {
+    for(var i in this.clients) {
+        if(this.clients[i].readyState == 1) {
+            this.clients[i].send(data, opts);
+        }
+        else {
+            console.log('Error: Client (' + i + ') not connected.');
+        }
+    }
+};
+
+
+/**
+ * http server to receive the video stream
+ */
+http.createServer(function (req, res) {
+    console.log(
+        'Stream Connected: ' + req.socket.remoteAddress +
+        ':' + req.socket.remotePort + ' size: ' + width + 'x' + height
+    );
+
+    req.on('data', function (data) {
+        wsServer.broadcast(data, { binary: true });
+    });
+}).listen(8082, function () {
+    console.log('Listening for video stream on port ' + 8082);
+
+
+
+    // Run do_ffmpeg.sh script to start webcam stream to disk
+    var myChild = childProcess.exec('./do_ffmpeg.sh');
+    myChild.on('Error', function(error){
+      console.log(error);
+    });
+
+
+
+});
+var command = ffmpeg('/dev/video0')
+        .format('mpeg1video')
+        .size('320x240')
+        .videoBitrate('800k')
+        .fps(30)
+        .on('error', function(err){
+            console.log('An error occurred: ' + err.message);
+        });
+var ffstream = command.pipe();
+
+ffstream.on('data', function(chunk){
+    wsServer.broadcast(chunk, { binary: true});
+});
+
+function servoCenter() {
+    //console.log("Centering to .0738");
+    servo.write(.0738);
+}
+
+function servoMove(val) {
+    //console.log("unscaled value: " + val.newX);
+    var scaledVal = val.newX;
+    scaledVal = scaledVal + 50;
+    scaledVal = (((.1049 - .0427)*(scaledVal))/100) + .0427;
+    //console.log("scaled value is: " + scaledVal);
+    servo.write(scaledVal);
+}
+
+function calibrateMotor(){
+
+
+    console.log("writing .1");
+    motor.write(.1);
+    setTimeout(function(){
+        console.log("writing .05");
+        motor.write(.05);
+        setTimeout(function(){
+            console.log("writing .075");
+            motor.write(.075);
+            io.emit('calibrate finished');
+            motorBusy = false;
+            motorCalibrating = false;
+        }, 3000);
+    }, 3000);
+
+}
+
+function motorGo(val){
+    // give the new Y value to our local variable
+    var scaledVal = val.newY + 50;
+
+    // this is scaled down from the calibration because the motor is so beefy
+    scaledVal = (((.08 - .07)*(scaledVal))/100) + .07;
+
+    console.log("Writing to motor controller: " + scaledVal);
+    motor.write(scaledVal);
+
+}
+
+function motorStop(){
+    console.log('Writing to motor controller: .075');
+    motor.write(.075);
+
+}
+
+
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  console.log('Listening on ' + addr.address + ':' + addr.port );
+  debug('Listening on ' + bind);
+
+}
